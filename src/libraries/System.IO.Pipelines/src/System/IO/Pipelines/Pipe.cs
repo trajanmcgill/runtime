@@ -28,24 +28,26 @@ namespace System.IO.Pipelines
         private static readonly SendOrPostCallback s_syncContextExecuteWithoutExecutionContextCallback = ExecuteWithoutExecutionContext!;
         private static readonly Action<object?> s_scheduleWithExecutionContextCallback = ExecuteWithExecutionContext!;
 
-        // This sync objects protects the shared state between the writer and reader (most of this class)
-        private readonly object _sync = new object();
-
-        private readonly MemoryPool<byte>? _pool;
-        private readonly int _minimumSegmentSize;
-        private readonly long _pauseWriterThreshold;
-        private readonly long _resumeWriterThreshold;
-
-        private readonly PipeScheduler _readerScheduler;
-        private readonly PipeScheduler _writerScheduler;
-
         // Mutable struct! Don't make this readonly
         private BufferSegmentStack _bufferSegmentPool;
 
         private readonly DefaultPipeReader _reader;
         private readonly DefaultPipeWriter _writer;
 
-        private readonly bool _useSynchronizationContext;
+        // The options instance
+        private readonly PipeOptions _options;
+
+        // Computed state from the options instance
+        private bool UseSynchronizationContext => _options.UseSynchronizationContext;
+        private int MinimumSegmentSize => _options.MinimumSegmentSize;
+        private long PauseWriterThreshold => _options.PauseWriterThreshold;
+        private long ResumeWriterThreshold => _options.ResumeWriterThreshold;
+
+        private PipeScheduler ReaderScheduler => _options.ReaderScheduler;
+        private PipeScheduler WriterScheduler => _options.WriterScheduler;
+
+        // This sync objects protects the shared state between the writer and reader (most of this class)
+        private object SyncObj => this;
 
         // The number of bytes flushed but not consumed by the reader
         private long _unconsumedBytes;
@@ -67,7 +69,6 @@ namespace System.IO.Pipelines
         private BufferSegment? _readHead;
         private int _readHeadIndex;
 
-        private readonly int _maxPooledBufferSize;
         private bool _disposed;
 
         // The extent of the bytes available to the PipeReader to consume
@@ -81,7 +82,6 @@ namespace System.IO.Pipelines
 
         // Determines what current operation is in flight (reading/writing)
         private PipeOperationState _operationState;
-
 
         internal long Length => _unconsumedBytes;
 
@@ -108,18 +108,9 @@ namespace System.IO.Pipelines
             _readerCompletion = default;
             _writerCompletion = default;
 
-            // If we're using the default pool then mark it as null since we're just going to use the
-            // array pool under the covers
-            _pool = options.Pool == MemoryPool<byte>.Shared ? null : options.Pool;
-            _maxPooledBufferSize = _pool?.MaxBufferSize ?? -1;
-            _minimumSegmentSize = options.MinimumSegmentSize;
-            _pauseWriterThreshold = options.PauseWriterThreshold;
-            _resumeWriterThreshold = options.ResumeWriterThreshold;
-            _readerScheduler = options.ReaderScheduler;
-            _writerScheduler = options.WriterScheduler;
-            _useSynchronizationContext = options.UseSynchronizationContext;
-            _readerAwaitable = new PipeAwaitable(completed: false, _useSynchronizationContext);
-            _writerAwaitable = new PipeAwaitable(completed: true, _useSynchronizationContext);
+            _options = options;
+            _readerAwaitable = new PipeAwaitable(completed: false, UseSynchronizationContext);
+            _writerAwaitable = new PipeAwaitable(completed: true, UseSynchronizationContext);
             _reader = new DefaultPipeReader(this);
             _writer = new DefaultPipeWriter(this);
         }
@@ -128,8 +119,8 @@ namespace System.IO.Pipelines
         {
             _readerCompletion.Reset();
             _writerCompletion.Reset();
-            _readerAwaitable = new PipeAwaitable(completed: false, _useSynchronizationContext);
-            _writerAwaitable = new PipeAwaitable(completed: true, _useSynchronizationContext);
+            _readerAwaitable = new PipeAwaitable(completed: false, UseSynchronizationContext);
+            _writerAwaitable = new PipeAwaitable(completed: true, UseSynchronizationContext);
             _readTailIndex = 0;
             _readHeadIndex = 0;
             _lastExaminedIndex = -1;
@@ -185,7 +176,7 @@ namespace System.IO.Pipelines
 
         private void AllocateWriteHeadSynchronized(int sizeHint)
         {
-            lock (_sync)
+            lock (SyncObj)
             {
                 _operationState.BeginWrite();
 
@@ -225,11 +216,19 @@ namespace System.IO.Pipelines
             Debug.Assert(sizeHint >= 0);
             BufferSegment newSegment = CreateSegmentUnsynchronized();
 
-            int maxSize = _maxPooledBufferSize;
+            MemoryPool<byte>? pool = null;
+            int maxSize = -1;
+
+            if (!_options.IsDefaultSharedMemoryPool)
+            {
+                pool = _options.Pool;
+                maxSize = pool.MaxBufferSize;
+            }
+
             if (sizeHint <= maxSize)
             {
                 // Use the specified pool as it fits. Specified pool is not null as maxSize == -1 if _pool is null.
-                newSegment.SetOwnedMemory(_pool!.Rent(GetSegmentSize(sizeHint, maxSize)));
+                newSegment.SetOwnedMemory(pool!.Rent(GetSegmentSize(sizeHint, maxSize)));
             }
             else
             {
@@ -246,7 +245,7 @@ namespace System.IO.Pipelines
         private int GetSegmentSize(int sizeHint, int maxBufferSize = int.MaxValue)
         {
             // First we need to handle case where hint is smaller than minimum segment size
-            sizeHint = Math.Max(_minimumSegmentSize, sizeHint);
+            sizeHint = Math.Max(MinimumSegmentSize, sizeHint);
             // After that adjust it to fit into pools max buffer size
             int adjustedToMaximumSize = Math.Min(maxBufferSize, sizeHint);
             return adjustedToMaximumSize;
@@ -296,9 +295,9 @@ namespace System.IO.Pipelines
             _unconsumedBytes += _unflushedBytes;
 
             // Do not reset if reader is complete
-            if (_pauseWriterThreshold > 0 &&
-                oldLength < _pauseWriterThreshold &&
-                _unconsumedBytes >= _pauseWriterThreshold &&
+            if (PauseWriterThreshold > 0 &&
+                oldLength < PauseWriterThreshold &&
+                _unconsumedBytes >= PauseWriterThreshold &&
                 !_readerCompletion.IsCompleted)
             {
                 _writerAwaitable.SetUncompleted();
@@ -312,7 +311,7 @@ namespace System.IO.Pipelines
 
         internal void Advance(int bytes)
         {
-            lock (_sync)
+            lock (SyncObj)
             {
                 if ((uint)bytes > (uint)_writingHeadMemory.Length)
                 {
@@ -341,12 +340,12 @@ namespace System.IO.Pipelines
         {
             CompletionData completionData;
             ValueTask<FlushResult> result;
-            lock (_sync)
+            lock (SyncObj)
             {
                 PrepareFlush(out completionData, out result, cancellationToken);
             }
 
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
 
             return result;
         }
@@ -394,7 +393,7 @@ namespace System.IO.Pipelines
             PipeCompletionCallbacks? completionCallbacks;
             bool readerCompleted;
 
-            lock (_sync)
+            lock (SyncObj)
             {
                 // Commit any pending buffers
                 CommitUnsynchronized();
@@ -411,10 +410,10 @@ namespace System.IO.Pipelines
 
             if (completionCallbacks != null)
             {
-                ScheduleCallbacks(_readerScheduler, completionCallbacks);
+                ScheduleCallbacks(ReaderScheduler, completionCallbacks);
             }
 
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
         }
 
         internal void AdvanceReader(in SequencePosition consumed)
@@ -448,7 +447,7 @@ namespace System.IO.Pipelines
 
             CompletionData completionData = default;
 
-            lock (_sync)
+            lock (SyncObj)
             {
                 var examinedEverything = false;
                 if (examinedSegment == _readTail)
@@ -473,8 +472,8 @@ namespace System.IO.Pipelines
 
                     Debug.Assert(_unconsumedBytes >= 0, "Length has gone negative");
 
-                    if (oldLength >= _resumeWriterThreshold &&
-                        _unconsumedBytes < _resumeWriterThreshold)
+                    if (oldLength >= ResumeWriterThreshold &&
+                        _unconsumedBytes < ResumeWriterThreshold)
                     {
                         _writerAwaitable.Complete(out completionData);
                     }
@@ -557,7 +556,7 @@ namespace System.IO.Pipelines
                 _operationState.EndRead();
             }
 
-            TrySchedule(_writerScheduler, completionData);
+            TrySchedule(WriterScheduler, completionData);
         }
 
         internal void CompleteReader(Exception? exception)
@@ -566,7 +565,7 @@ namespace System.IO.Pipelines
             CompletionData completionData;
             bool writerCompleted;
 
-            lock (_sync)
+            lock (SyncObj)
             {
                 // If we're reading, treat clean up that state before continuting
                 if (_operationState.IsReadingActive)
@@ -589,10 +588,10 @@ namespace System.IO.Pipelines
 
             if (completionCallbacks != null)
             {
-                ScheduleCallbacks(_writerScheduler, completionCallbacks);
+                ScheduleCallbacks(WriterScheduler, completionCallbacks);
             }
 
-            TrySchedule(_writerScheduler, completionData);
+            TrySchedule(WriterScheduler, completionData);
         }
 
         internal void OnWriterCompleted(Action<Exception?, object?> callback, object? state)
@@ -603,35 +602,35 @@ namespace System.IO.Pipelines
             }
 
             PipeCompletionCallbacks? completionCallbacks;
-            lock (_sync)
+            lock (SyncObj)
             {
                 completionCallbacks = _writerCompletion.AddCallback(callback, state);
             }
 
             if (completionCallbacks != null)
             {
-                ScheduleCallbacks(_readerScheduler, completionCallbacks);
+                ScheduleCallbacks(ReaderScheduler, completionCallbacks);
             }
         }
 
         internal void CancelPendingRead()
         {
             CompletionData completionData;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _readerAwaitable.Cancel(out completionData);
             }
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
         }
 
         internal void CancelPendingFlush()
         {
             CompletionData completionData;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _writerAwaitable.Cancel(out completionData);
             }
-            TrySchedule(_writerScheduler, completionData);
+            TrySchedule(WriterScheduler, completionData);
         }
 
         internal void OnReaderCompleted(Action<Exception?, object?> callback, object? state)
@@ -642,14 +641,14 @@ namespace System.IO.Pipelines
             }
 
             PipeCompletionCallbacks? completionCallbacks;
-            lock (_sync)
+            lock (SyncObj)
             {
                 completionCallbacks = _readerCompletion.AddCallback(callback, state);
             }
 
             if (completionCallbacks != null)
             {
-                ScheduleCallbacks(_writerScheduler, completionCallbacks);
+                ScheduleCallbacks(WriterScheduler, completionCallbacks);
             }
         }
 
@@ -661,7 +660,7 @@ namespace System.IO.Pipelines
             }
 
             ValueTask<ReadResult> result;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _readerAwaitable.BeginOperation(token, s_signalReaderAwaitable, this);
 
@@ -683,7 +682,7 @@ namespace System.IO.Pipelines
 
         internal bool TryRead(out ReadResult result)
         {
-            lock (_sync)
+            lock (SyncObj)
             {
                 if (_readerCompletion.IsCompleted)
                 {
@@ -781,7 +780,7 @@ namespace System.IO.Pipelines
 
         private void CompletePipe()
         {
-            lock (_sync)
+            lock (SyncObj)
             {
                 if (_disposed)
                 {
@@ -826,7 +825,7 @@ namespace System.IO.Pipelines
         {
             CompletionData completionData;
             bool doubleCompletion;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _readerAwaitable.OnCompleted(continuation, state, flags, out completionData, out doubleCompletion);
             }
@@ -834,7 +833,7 @@ namespace System.IO.Pipelines
             {
                 Writer.Complete(ThrowHelper.CreateInvalidOperationException_NoConcurrentOperation());
             }
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
         }
 
         internal ReadResult GetReadAsyncResult()
@@ -844,7 +843,7 @@ namespace System.IO.Pipelines
             CancellationToken cancellationToken = default;
             try
             {
-                lock (_sync)
+                lock (SyncObj)
                 {
                     if (!_readerAwaitable.IsCompleted)
                     {
@@ -919,7 +918,7 @@ namespace System.IO.Pipelines
 
             try
             {
-                lock (_sync)
+                lock (SyncObj)
                 {
                     if (!_writerAwaitable.IsCompleted)
                     {
@@ -968,7 +967,7 @@ namespace System.IO.Pipelines
             CompletionData completionData;
             ValueTask<FlushResult> result;
 
-            lock (_sync)
+            lock (SyncObj)
             {
                 // Allocate whatever the pool gives us so we can write, this also marks the
                 // state as writing
@@ -989,7 +988,7 @@ namespace System.IO.Pipelines
                 PrepareFlush(out completionData, out result, cancellationToken);
             }
 
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
             return result;
         }
 
@@ -1029,7 +1028,7 @@ namespace System.IO.Pipelines
         {
             CompletionData completionData;
             bool doubleCompletion;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _writerAwaitable.OnCompleted(continuation, state, flags, out completionData, out doubleCompletion);
             }
@@ -1037,27 +1036,27 @@ namespace System.IO.Pipelines
             {
                 Reader.Complete(ThrowHelper.CreateInvalidOperationException_NoConcurrentOperation());
             }
-            TrySchedule(_writerScheduler, completionData);
+            TrySchedule(WriterScheduler, completionData);
         }
 
         private void ReaderCancellationRequested()
         {
             CompletionData completionData;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _readerAwaitable.CancellationTokenFired(out completionData);
             }
-            TrySchedule(_readerScheduler, completionData);
+            TrySchedule(ReaderScheduler, completionData);
         }
 
         private void WriterCancellationRequested()
         {
             CompletionData completionData;
-            lock (_sync)
+            lock (SyncObj)
             {
                 _writerAwaitable.CancellationTokenFired(out completionData);
             }
-            TrySchedule(_writerScheduler, completionData);
+            TrySchedule(WriterScheduler, completionData);
         }
 
         /// <summary>
@@ -1075,7 +1074,7 @@ namespace System.IO.Pipelines
         /// </summary>
         public void Reset()
         {
-            lock (_sync)
+            lock (SyncObj)
             {
                 if (!_disposed)
                 {

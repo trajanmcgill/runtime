@@ -53,6 +53,7 @@ namespace System.IO.Pipelines
             }
 
             Pool = pool ?? MemoryPool<byte>.Shared;
+            IsDefaultSharedMemoryPool = Pool == MemoryPool<byte>.Shared;
             ReaderScheduler = readerScheduler ?? PipeScheduler.ThreadPool;
             WriterScheduler = writerScheduler ?? PipeScheduler.ThreadPool;
             PauseWriterThreshold = pauseWriterThreshold;
@@ -96,5 +97,10 @@ namespace System.IO.Pipelines
         /// Gets the <see cref="MemoryPool{Byte}"/> instances used for buffer management
         /// </summary>
         public MemoryPool<byte> Pool { get; }
+
+        /// <summary>
+        /// Returns true if Pool is <see cref="MemoryPool{Byte}"/>.Shared
+        /// </summary>
+        internal bool IsDefaultSharedMemoryPool { get; }
     }
 }
