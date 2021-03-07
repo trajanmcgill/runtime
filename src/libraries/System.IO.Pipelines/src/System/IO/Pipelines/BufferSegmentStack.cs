@@ -20,6 +20,8 @@ namespace System.IO.Pipelines
             _size = 0;
         }
 
+        public object Sync => _array;
+
         public int Count => _size;
 
         public bool TryPop([NotNullWhen(true)] out BufferSegment? result)
