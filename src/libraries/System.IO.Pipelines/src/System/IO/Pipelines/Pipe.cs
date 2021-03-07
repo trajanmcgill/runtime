@@ -47,6 +47,7 @@ namespace System.IO.Pipelines
         private PipeScheduler WriterScheduler => _options.WriterScheduler;
 
         // This sync objects protects the shared state between the writer and reader (most of this class)
+        // We use the bufferSegmentPool's internal array as the synchronization object
         private object SyncObj => _bufferSegmentPool.Sync;
 
         // The number of bytes flushed but not consumed by the reader
