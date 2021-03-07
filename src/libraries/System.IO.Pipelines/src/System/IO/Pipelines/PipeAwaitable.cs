@@ -78,7 +78,7 @@ namespace System.IO.Pipelines
 
             _completion = null;
             _completionState = null;
-            schedulingContext = null;
+            _schedulingContext = null;
 
             completionData = currentCompletion != null ?
                 new CompletionData(currentCompletion, currentState, executionContext, synchronizationContext) :
