@@ -20,10 +20,6 @@ namespace System.IO.Pipelines
             _size = 0;
         }
 
-        // We re-use the array as the lock guarding the state of the Pipe.
-        // this shouldn't be used anywhere else.
-        public object Sync => _array;
-
         public int Count => _size;
 
         public bool TryPop([NotNullWhen(true)] out BufferSegment? result)
