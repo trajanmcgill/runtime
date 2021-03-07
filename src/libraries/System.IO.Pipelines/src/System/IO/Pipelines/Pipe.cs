@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -28,8 +29,7 @@ namespace System.IO.Pipelines
         private static readonly SendOrPostCallback s_syncContextExecuteWithoutExecutionContextCallback = ExecuteWithoutExecutionContext!;
         private static readonly Action<object?> s_scheduleWithExecutionContextCallback = ExecuteWithExecutionContext!;
 
-        // Mutable struct! Don't make this readonly
-        private BufferSegmentStack _bufferSegmentPool;
+        private readonly Stack<BufferSegment> _bufferSegmentPool;
 
         private readonly DefaultPipeReader _reader;
         private readonly DefaultPipeWriter _writer;
@@ -47,8 +47,8 @@ namespace System.IO.Pipelines
         private PipeScheduler WriterScheduler => _options.WriterScheduler;
 
         // This sync objects protects the shared state between the writer and reader (most of this class)
-        // We use the bufferSegmentPool's internal array as the synchronization object
-        private object SyncObj => _bufferSegmentPool.Sync;
+        // We use the bufferSegmentPool as the synchronization object
+        private object SyncObj => _bufferSegmentPool;
 
         // The number of bytes flushed but not consumed by the reader
         private long _unconsumedBytes;
@@ -103,7 +103,7 @@ namespace System.IO.Pipelines
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.options);
             }
 
-            _bufferSegmentPool = new BufferSegmentStack(InitialSegmentPoolSize);
+            _bufferSegmentPool = new Stack<BufferSegment>(InitialSegmentPoolSize);
 
             _operationState = default;
             _readerCompletion = default;
