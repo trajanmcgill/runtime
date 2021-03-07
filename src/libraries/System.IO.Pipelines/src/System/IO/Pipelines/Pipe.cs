@@ -29,13 +29,15 @@ namespace System.IO.Pipelines
         private static readonly SendOrPostCallback s_syncContextExecuteWithoutExecutionContextCallback = ExecuteWithoutExecutionContext!;
         private static readonly Action<object?> s_scheduleWithExecutionContextCallback = ExecuteWithExecutionContext!;
 
-        private readonly Stack<BufferSegment> _bufferSegmentPool;
+        // Mutable struct! Don't make this readonly
+        private BufferSegmentStack _bufferSegmentPool;
 
         private readonly DefaultPipeReader _reader;
         private readonly DefaultPipeWriter _writer;
 
         // The options instance
         private readonly PipeOptions _options;
+        private readonly object _sync = new object();
 
         // Computed state from the options instance
         private bool UseSynchronizationContext => _options.UseSynchronizationContext;
@@ -47,8 +49,7 @@ namespace System.IO.Pipelines
         private PipeScheduler WriterScheduler => _options.WriterScheduler;
 
         // This sync objects protects the shared state between the writer and reader (most of this class)
-        // We use the bufferSegmentPool as the synchronization object
-        private object SyncObj => _bufferSegmentPool;
+        private object SyncObj => _sync;
 
         // The number of bytes flushed but not consumed by the reader
         private long _unconsumedBytes;
@@ -103,7 +104,7 @@ namespace System.IO.Pipelines
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.options);
             }
 
-            _bufferSegmentPool = new Stack<BufferSegment>(InitialSegmentPoolSize);
+            _bufferSegmentPool = new BufferSegmentStack(InitialSegmentPoolSize);
 
             _operationState = default;
             _readerCompletion = default;
